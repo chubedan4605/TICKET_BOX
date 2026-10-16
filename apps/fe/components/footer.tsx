@@ -1,0 +1,64 @@
+import Link from 'next/link';
+import { Code2, Heart, Mail, Ticket } from 'lucide-react';
+
+export function Footer() {
+  return (
+    <footer className="mt-20 border-t border-border bg-foreground text-background">
+      <div className="mx-auto max-w-7xl px-4 py-12">
+        <div className="mb-10 grid grid-cols-1 gap-8 md:grid-cols-4">
+          <div>
+            <Link
+              href="/"
+              className="mb-4 flex items-center gap-3 text-lg font-black group/logo text-background hover:text-background w-fit"
+            >
+              <span className="grid size-9 place-items-center rounded-xl bg-gradient-to-tr from-primary to-rose-500 text-white shadow-lg shadow-primary/20 shrink-0 group-hover/logo:scale-105 transition-all duration-300">
+                <Ticket className="size-4.5" />
+              </span>
+              <span className="group-hover/logo:text-primary transition-colors duration-300">TicketBox</span>
+            </Link>
+            <p className="max-w-xs text-sm leading-6 text-background/65">
+              Nền tảng đặt vé dành cho concert, lễ hội âm nhạc và sự kiện biểu diễn tại Việt Nam.
+            </p>
+          </div>
+
+          <div>
+            <h4 className="mb-4 font-semibold text-background">Công ty</h4>
+            <ul className="space-y-2 text-sm text-background/60">
+              <li><Link href="/about" className="transition hover:text-primary">Về chúng tôi</Link></li>
+              <li><Link href="/contact" className="transition hover:text-primary">Liên hệ</Link></li>
+              <li><Link href="/careers" className="transition hover:text-primary">Sự nghiệp</Link></li>
+            </ul>
+          </div>
+
+          <div>
+            <h4 className="mb-4 font-semibold text-background">Pháp lý</h4>
+            <ul className="space-y-2 text-sm text-background/60">
+              <li><Link href="/terms" className="transition hover:text-primary">Điều khoản</Link></li>
+              <li><Link href="/privacy" className="transition hover:text-primary">Chính sách bảo mật</Link></li>
+              <li><Link href="/cookie" className="transition hover:text-primary">Chính sách Cookie</Link></li>
+            </ul>
+          </div>
+
+          <div>
+            <h4 className="mb-4 font-semibold text-background">Theo dõi</h4>
+            <div className="flex gap-4">
+              <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="grid size-10 place-items-center rounded-full border border-background/15 text-background/65 transition hover:border-primary hover:text-primary" aria-label="Kênh cộng đồng">
+                <Code2 className="size-5" />
+              </a>
+              <a href="/" className="grid size-10 place-items-center rounded-full border border-background/15 text-background/65 transition hover:border-primary hover:text-primary" aria-label="Yêu thích">
+                <Heart className="size-5" />
+              </a>
+              <a href="mailto:support@ticketbox.vn" className="grid size-10 place-items-center rounded-full border border-background/15 text-background/65 transition hover:border-primary hover:text-primary" aria-label="Email">
+                <Mail className="size-5" />
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-background/10 pt-8 text-center text-sm text-background/50">
+          <p>&copy; 2026 TicketBox. Tất cả quyền được bảo lưu.</p>
+        </div>
+      </div>
+    </footer>
+  );
+}

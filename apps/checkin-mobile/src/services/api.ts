@@ -1,0 +1,407 @@
+/**
+ * API Service
+ * Wrapper around fetch with standardized response format
+ * TicketBox Check-in Mobile App
+ */
+
+import { API_BASE_URL, API_TIMEOUT } from "../constants/api";
+import type { ApiResponse } from "../types";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+export const AUTH_STORAGE_KEYS = {
+  accessToken: "auth_token",
+  refreshToken: "auth_refresh_token",
+  user: "auth_user",
+} as const;
+
+const CHECKIN_CLIENT_HEADER = "checkin-mobile";
+
+type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+class ApiService {
+  private baseUrl: string;
+  private token: string | null = null;
+  private refreshToken: string | null = null;
+  private refreshPromise: Promise<string | null> | null = null;
+
+  // Circuit Breaker State
+  private circuitState: CircuitState = 'CLOSED';
+  private consecutiveFailures = 0;
+  private readonly FAILURE_THRESHOLD = 3;
+  private nextAttemptTime = 0;
+  private readonly RESET_TIMEOUT_MS = 60000; // 1 minute
+
+  constructor() {
+    this.baseUrl = API_BASE_URL;
+  }
+
+  /** Set auth token */
+  setToken(token: string | null): void {
+    this.token = token;
+  }
+
+  /** Set refresh token for native clients */
+  setRefreshToken(token: string | null): void {
+    this.refreshToken = token;
+  }
+
+  private isOffline = false;
+  private listeners: Set<(isOffline: boolean) => void> = new Set();
+
+  onConnectionStatusChange(listener: (isOffline: boolean) => void) {
+    this.listeners.add(listener);
+    listener(this.isOffline);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  setOfflineStatus(status: boolean) {
+    if (this.isOffline !== status) {
+      this.isOffline = status;
+      this.listeners.forEach(l => l(status));
+    }
+  }
+
+  /** Generic request method with timeout and response formatting */
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {},
+  ): Promise<ApiResponse<T>> {
+    // 1. Check Circuit Breaker
+    if (this.circuitState === 'OPEN') {
+      if (Date.now() > this.nextAttemptTime) {
+        this.circuitState = 'HALF_OPEN';
+      } else {
+        // Fast fail -> immediately return offline error without waiting for timeout
+        this.setOfflineStatus(true);
+        return {
+          success: false,
+          data: null as T,
+          message: 'Circuit Breaker OPEN: Network is too slow/unstable.',
+        };
+      }
+    }
+
+    try {
+      const currentToken = await this.getAccessToken();
+      let result = await this.sendRequest(endpoint, options, currentToken);
+
+      // Success -> Reset circuit breaker
+      this.consecutiveFailures = 0;
+      this.circuitState = 'CLOSED';
+      this.setOfflineStatus(false);
+
+      if (this.shouldAttemptRefresh(endpoint, result.response)) {
+        const newAccessToken = await this.refreshAccessToken();
+        if (newAccessToken) {
+          result = await this.sendRequest(endpoint, options, newAccessToken);
+        } else {
+          await this.clearAuthState();
+        }
+      }
+
+      return this.toApiResponse<T>(result.response, result.json);
+    } catch (error) {
+      console.error(`[API Error] request to ${endpoint} failed:`, error);
+
+      // Update Circuit Breaker
+      this.recordFailure();
+
+      // Fetch threw an error, so we are offline
+      this.setOfflineStatus(true);
+
+      return {
+        success: false,
+        data: null as T,
+        message: this.getErrorMessage(error),
+      };
+    }
+  }
+
+  private recordFailure() {
+    this.consecutiveFailures++;
+    if (this.circuitState === 'HALF_OPEN' || this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
+      this.circuitState = 'OPEN';
+      this.nextAttemptTime = Date.now() + this.RESET_TIMEOUT_MS;
+      console.warn(`[Circuit Breaker] Tripped! State is now OPEN. Next attempt in ${this.RESET_TIMEOUT_MS}ms.`);
+    }
+  }
+
+  private async sendRequest(
+    endpoint: string,
+    options: RequestInit,
+    accessToken: string | null,
+  ): Promise<{ response: Response; json: any }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT);
+
+    try {
+      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+        ...options,
+        headers: this.buildHeaders(options.headers, accessToken, options.body),
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const json = await response.json().catch(() => ({}));
+
+      return { response, json };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private buildHeaders(
+    optionHeaders: RequestInit["headers"],
+    accessToken: string | null,
+    body?: RequestInit["body"] | null,
+  ): Headers {
+    const headers = new Headers(optionHeaders);
+
+    if (!headers.has("Content-Type") && !(body instanceof FormData)) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    headers.set("X-TicketBox-Client", CHECKIN_CLIENT_HEADER);
+
+    if (accessToken) {
+      headers.set("Authorization", `Bearer ${accessToken}`);
+    }
+
+    return headers;
+  }
+
+  private async getAccessToken(): Promise<string | null> {
+    if (this.token) {
+      return this.token;
+    }
+
+    const storedToken = await AsyncStorage.getItem(
+      AUTH_STORAGE_KEYS.accessToken,
+    );
+    if (storedToken) {
+      this.token = storedToken;
+    }
+
+    return storedToken;
+  }
+
+  private async getRefreshToken(): Promise<string | null> {
+    if (this.refreshToken) {
+      return this.refreshToken;
+    }
+
+    const storedToken = await AsyncStorage.getItem(
+      AUTH_STORAGE_KEYS.refreshToken,
+    );
+    if (storedToken) {
+      this.refreshToken = storedToken;
+    }
+
+    return storedToken;
+  }
+
+  private async refreshAccessToken(): Promise<string | null> {
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.performRefresh().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+
+    return this.refreshPromise;
+  }
+
+  private async performRefresh(): Promise<string | null> {
+    const refreshToken = await this.getRefreshToken();
+    const body = refreshToken ? JSON.stringify({ refreshToken }) : undefined;
+    const result = await this.sendRequest(
+      "/auth/refresh",
+      { method: "POST", body },
+      null,
+    );
+
+    if (!result.response.ok) {
+      if (result.response.status === 401 || result.response.status === 403) {
+        await this.clearAuthState();
+      }
+      return null;
+    }
+
+    const data = result.json?.data ?? result.json;
+    const accessToken = data?.accessToken;
+    const nextRefreshToken = data?.refreshToken;
+
+    if (typeof accessToken !== "string" || !accessToken) {
+      await this.clearAuthState();
+      return null;
+    }
+
+    await AsyncStorage.setItem(AUTH_STORAGE_KEYS.accessToken, accessToken);
+    this.token = accessToken;
+
+    if (typeof nextRefreshToken === "string" && nextRefreshToken) {
+      await AsyncStorage.setItem(
+        AUTH_STORAGE_KEYS.refreshToken,
+        nextRefreshToken,
+      );
+      this.refreshToken = nextRefreshToken;
+    }
+
+    return accessToken;
+  }
+
+  private async clearAuthState(): Promise<void> {
+    this.token = null;
+    this.refreshToken = null;
+    await AsyncStorage.multiRemove([
+      AUTH_STORAGE_KEYS.accessToken,
+      AUTH_STORAGE_KEYS.refreshToken,
+      AUTH_STORAGE_KEYS.user,
+    ]);
+  }
+
+  private shouldAttemptRefresh(endpoint: string, response: Response): boolean {
+    return (
+      response.status === 401 &&
+      endpoint !== "/auth/refresh" &&
+      endpoint !== "/auth/login" &&
+      endpoint !== "/auth/register"
+    );
+  }
+
+  private toApiResponse<T>(response: Response, json: any): ApiResponse<T> {
+    if (json?.success !== undefined) {
+      return json as ApiResponse<T>;
+    }
+
+    return {
+      success: response.ok,
+      data: json?.data !== undefined ? json.data : json,
+      message: response.ok ? undefined : json?.message || "Request failed",
+    };
+  }
+
+  private getErrorMessage(error: unknown): string {
+    if (!(error instanceof Error)) {
+      return "Unknown error";
+    }
+
+    return error.name === "AbortError" ? "Request timeout" : error.message;
+  }
+
+  async restoreAuthSession(): Promise<boolean> {
+    try {
+      const token = await this.getAccessToken();
+      if (!token) return false;
+      
+      // Try to fetch profile to verify token is still valid
+      const result = await this.get("/auth/profile");
+      if (result.success) {
+         return true;
+      }
+      
+      // If profile fails (e.g. 401), token is invalid
+      await this.clearAuthState();
+      return false;
+    } catch (error) {
+      console.warn("restoreAuthSession error:", error);
+      return false;
+    }
+  }
+
+  async get<T>(endpoint: string): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, { method: "GET" });
+  }
+
+  async post<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, {
+      method: "POST",
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  async put<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, {
+      method: "PUT",
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  async delete<T>(endpoint: string): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, { method: "DELETE" });
+  }
+
+  /** Upload multipart form data */
+  async upload<T>(
+    endpoint: string,
+    formData: FormData,
+  ): Promise<ApiResponse<T>> {
+    try {
+      const currentToken = await this.getAccessToken();
+      let result = await this.sendUploadRequest(
+        endpoint,
+        formData,
+        currentToken,
+      );
+
+      if (result.response.status === 401) {
+        const newAccessToken = await this.refreshAccessToken();
+        if (newAccessToken) {
+          result = await this.sendUploadRequest(
+            endpoint,
+            formData,
+            newAccessToken,
+          );
+        } else {
+          await this.clearAuthState();
+        }
+      }
+
+      // If we got a response, we are online
+      this.setOfflineStatus(false);
+
+      return this.toApiResponse<T>(result.response, result.json);
+    } catch (error) {
+      this.setOfflineStatus(true);
+      return {
+        success: false,
+        data: null as T,
+        message: this.getErrorMessage(error),
+      };
+    }
+  }
+
+  private async sendUploadRequest(
+    endpoint: string,
+    formData: FormData,
+    accessToken: string | null,
+  ): Promise<{ response: Response; json: any }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT * 3);
+
+    try {
+      const headers = new Headers();
+      headers.set("X-TicketBox-Client", CHECKIN_CLIENT_HEADER);
+
+      if (accessToken) {
+        headers.set("Authorization", `Bearer ${accessToken}`);
+      }
+
+      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: "POST",
+        headers,
+        body: formData,
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const json = await response.json().catch(() => ({}));
+
+      return { response, json };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+/** Singleton API instance */
+export const apiService = new ApiService();

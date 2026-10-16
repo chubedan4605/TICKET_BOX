@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: nest-prisma-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nest_prisma_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - nest_prisma_pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: ticketbox-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - ticketbox_redis_data:/data
+    command: redis-server --appendonly yes
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: ticketbox-mailhog
+    restart: always
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  minio:
+    image: minio/minio
+    container_name: ticketbox-minio
+    restart: always
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ticketbox_minio_data:/data
+    command: server /data --console-address ":9001"
+
+  createbuckets:
+    image: minio/mc
+    container_name: ticketbox-minio-provisioner
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin; do echo 'Waiting for MinIO...'; sleep 1; done;
+      /usr/bin/mc mb --ignore-existing myminio/my-tickbox-app-0322;
+      /usr/bin/mc anonymous set public myminio/my-tickbox-app-0322;
+      echo 'MinIO Bucket my-tickbox-app-0322 provisioned!';
+      exit 0;
+      "
+
+volumes:
+  nest_prisma_pg_data:
+  ticketbox_redis_data:
+  ticketbox_minio_data:
